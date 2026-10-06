@@ -45,6 +45,7 @@ var UT_LOG = {
         try { console.log('[UT INFO] ' + Array.prototype.slice.call(arguments).join(' ')); } catch (_) {}
     },
     raw: function () {
+        if (!UT_DEBUG) return;
         try { console.log('[UT] ' + Array.prototype.slice.call(arguments).join(' ')); } catch (_) {}
     }
 };
