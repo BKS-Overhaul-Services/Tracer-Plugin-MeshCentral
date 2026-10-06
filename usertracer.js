@@ -16,7 +16,7 @@
 "use strict";
 
 // Configurável via env var (apenas)
-var UT_DEBUG = true; // debug sempre ativo — desligue em release build
+var UT_DEBUG = false; // debug sempre ativo — desligue em release build
 
 // Event types enum (elimina drift entre scanner/admin)
 var UT_EVENT = Object.freeze({
