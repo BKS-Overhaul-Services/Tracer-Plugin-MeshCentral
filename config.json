@@ -1,7 +1,7 @@
 {
   "name": "User-Device Tracer",
   "shortName": "usertracer",
-  "version": "3.5.95",
+  "version": "3.5.96",
   "author": "Misael Filho",
   "description": "Rastreia associação entre usuários e dispositivos Windows em ambiente AD. Mantém lastro histórico de qual usuário AD usou qual máquina, com timeline e auditoria.",
   "hasAdminPanel": true,
