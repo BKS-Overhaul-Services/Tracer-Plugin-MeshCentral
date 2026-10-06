@@ -1,3 +1,8 @@
+## 3.5.97 (2026-10-06)
+
+### Fixed
+- **Log spam `[UT]` com UT_DEBUG=false**: `UT_LOG.raw` (usertracer.js:47) não era gateado pela flag — apenas `debug` e `info` estavam. 119 chamadas `raw` (checkNode, scanNow, hook_processAgentData, etc) imprimiam sempre, poluindo o console do servidor em produção. Fix: adicionado `if (!UT_DEBUG) return;` no `raw`. `[UT ERROR]` permanece sempre ativo.
+
 ## 3.5.95 (2026-08-05)
 
 ### Fixed
