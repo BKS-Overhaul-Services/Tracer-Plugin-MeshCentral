@@ -554,7 +554,10 @@ module.exports.usertracer = function (parent) {
     obj._agentSend = function (agentConn, cmd) {
         try {
             if (!agentConn || typeof agentConn.send !== 'function') return false;
-            agentConn.send(cmd);
+            // CONTRATO upstream: servidor → agente é SEMPRE JSON string
+            // (meshagent.js:73 aceita ambos, mas o protocolo do agente espera texto;
+            //  todas as chamadas nativas usam obj.send(JSON.stringify(...)))
+            agentConn.send(typeof cmd === 'string' ? cmd : JSON.stringify(cmd));
             return true;
         } catch (e) { UT_LOG.error('_agentSend', e); return false; }
     };
@@ -607,6 +610,8 @@ module.exports.usertracer = function (parent) {
         var toStore = [];
         var pendingDbCheck = 0;
         var nodeName = null;
+        var forEachDone = false;   // finish só vale após o loop completo...
+        var finished = false;      // ...e só uma vez (callbacks síncronos disparam cedo)
         try {
             var ws = obj.meshServer.webserver.wsagents || {};
             var ag = ws[nodeid];
@@ -614,7 +619,8 @@ module.exports.usertracer = function (parent) {
         } catch (_) {}
 
         function finish() {
-            if (pendingDbCheck > 0) return;
+            if (finished || !forEachDone || pendingDbCheck > 0) return;
+            finished = true;
             // grava o que passou no dedup antes de ack (garante persist antes do agente apagar)
             toStore.forEach(function (evt) { obj.db.addEvent(evt); });
             // ACK: tudo processado (inclusive duplicados) — o agente remove do journal
@@ -673,6 +679,7 @@ module.exports.usertracer = function (parent) {
                 UT_LOG.error('_agentIngest:event', e, { type: ev && ev.type });
             }
         });
+        forEachDone = true;
         finish();
     };
 
@@ -699,7 +706,7 @@ module.exports.usertracer = function (parent) {
             var timer = setTimeout(function () {
                 delete obj._pendingAgentQueries[reqId];
                 obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: reqId, nodeid: nid, offline: true, timeout: true });
-            }, 5000);
+            }, obj._queryTimeoutMs || 5000);
             obj._pendingAgentQueries[reqId] = { sid: sid, timer: timer };
             var sent = obj._agentSend(agentConn, {
                 action: 'plugin', plugin: 'usertracer', from: 'server', cmd: 'query-state', reqId: reqId

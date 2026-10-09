@@ -55,6 +55,13 @@ h2{font-size:15px;font-weight:700;color:#003366}.sub{color:#555;font-size:11px;m
   </div>
   <div id="gantt"><div class="empty">Selecione o período.</div></div>
 </div>
+<div class="panel" style="padding:0;overflow:hidden">
+  <div class="panel-title" style="margin:0;display:flex;justify-content:space-between;align-items:center">
+    <span>Estado agora</span>
+    <span style="font-size:10px;color:#666;font-weight:400;display:flex;align-items:center;gap:6px"><span id="liveMeta"></span><button class="btn" onclick="queryLiveState()">↻</button></span>
+  </div>
+  <div id="liveState"><div class="empty">—</div></div>
+</div>
 <div class="panel">
   <div class="panel-title">Usuários que já usaram este dispositivo</div>
   <div id="userList"><div class="empty">Selecione o período primeiro.</div></div>
@@ -133,33 +140,62 @@ function loadHistory(){
         ms.send({action:'plugin',plugin:'usertracer',pluginaction:'getTimeline',nodeid:nodeid,startDate:s+'T00:00:00',endDate:e+'T23:59:59.999',limit:2000,_reqSeq:_s});
     }
 }
+function renderLiveState(d){
+    var el=document.getElementById('liveState');if(!el)return;
+    var meta=document.getElementById('liveMeta');
+    if(d.offline){el.innerHTML='<div class="empty">Agente offline'+(d.timeout?' (timeout)':'')+' — exibindo último estado conhecido na timeline.</div>';if(meta)meta.textContent='';return;}
+    var locked=d.locked||[];
+    function isLocked(u){var s=splitUser(u).u||u;for(var i=0;i<locked.length;i++){var l=splitUser(locked[i]).u||locked[i];if(l===s||locked[i]===u)return true;}return false;}
+    var sess=(d.sessions||[]).filter(function(s){return s.user;});
+    if(!sess.length){el.innerHTML='<div class="empty">Nenhuma sessão ativa.</div>';}
+    else{
+        var h='';
+        sess.forEach(function(s){
+            var lk=isLocked(s.user);
+            var badge=lk?'<span class="ubadge" style="background:#e65100;color:#fff">Bloqueado</span>':'<span class="ubadge" style="background:#2e7d32;color:#fff">Ativo</span>';
+            h+='<div class="ucard"><div class="uav">'+esc(splitUser(s.user).u.charAt(0).toUpperCase())+'</div><div><div class="uname">'+esc(s.user)+'</div><div class="udev">sessão '+(s.sid!=null?esc(s.sid):'—')+'</div></div>'+badge+'<div class="online"></div></div>';
+        });
+        el.innerHTML=h;
+    }
+    if(meta)meta.textContent='via agente'+(d.journalPending!=null&&d.journalPending>0?' · '+d.journalPending+' eventos pendentes':'')+(d.moduleVer?' · v'+d.moduleVer:'');
+}
+function queryLiveState(){
+    if(_unmounted||!ms)return;
+    dlog('LIVE','query sent');
+    ms.send({action:'plugin',plugin:'usertracer',pluginaction:'queryState',nodeid:nodeid});
+}
+function eventSrcBadge(e){
+    if(e && e.src==='agent')return'\nOrigem: evento do agente (preciso)';
+    if(e && e.src==='scan')return'\nOrigem: varredura (±30s)';
+    return'';
+}
 function buildSessions(events,rs,re){
     var by={};
     events.slice().sort(function(a,b){return new Date(a.detectedAt)-new Date(b.detectedAt);}).forEach(function(e){
         var k=e.displayUser||e.username||'?';if(!by[k])by[k]={user:e.username,display:k,events:[]};by[k].events.push(e);
     });
     var out=[];Object.keys(by).forEach(function(k){
-        var g=by[k],activeStart=null,activeState='login';
-        function pushSeg(s,e,st,open){
+        var g=by[k],activeStart=null,activeState='login',activeSrc=null;
+        function pushSeg(s,e,st,open,src){
             var ss=Math.max(rs,s),ee=Math.max(rs,Math.min(re,e));
-            if(ee>ss)out.push({user:g.user,display:g.display,start:ss,end:ee,state:st,open:!!open});
+            if(ee>ss)out.push({user:g.user,display:g.display,start:ss,end:ee,state:st,open:!!open,_srcEvt:src||null});
         }
         g.events.forEach(function(e){
             var t=new Date(e.detectedAt).getTime();
             if(e.eventType==='userLogin'){
-                if(activeStart!=null)pushSeg(activeStart,t,activeState,false);
-                activeStart=t;activeState='login';
+                if(activeStart!=null)pushSeg(activeStart,t,activeState,false,activeSrc);
+                activeStart=t;activeState='login';activeSrc=e.src;
             }else if(e.eventType==='userLogout'){
-                if(activeStart!=null){pushSeg(activeStart,t,activeState,false);activeStart=null;}
-                else pushSeg(t-30*60000,t,'logout',false);
+                if(activeStart!=null){pushSeg(activeStart,t,activeState,false,activeSrc);activeStart=null;}
+                else pushSeg(t-30*60000,t,'logout',false,e.src);
             }else if(e.eventType==='userLock'){
-                if(activeStart!=null)pushSeg(activeStart,t,activeState,false);
-                activeStart=t;activeState='lock';
+                if(activeStart!=null)pushSeg(activeStart,t,activeState,false,activeSrc);
+                activeStart=t;activeState='lock';activeSrc=e.src;
             }else if(e.eventType==='userUnlock'){
-                if(activeStart!=null)pushSeg(activeStart,t,activeState,false);
-                activeStart=t;activeState='login';
+                if(activeStart!=null)pushSeg(activeStart,t,activeState,false,activeSrc);
+                activeStart=t;activeState='login';activeSrc=e.src;
             }
-        });if(activeStart!=null)pushSeg(activeStart,Math.min(re,Date.now()),activeState,true);
+        });if(activeStart!=null)pushSeg(activeStart,Math.min(re,Date.now()),activeState,true,activeSrc);
     });return out;
 }
 function _renderGantt(events,rs,re,pwrMap){
@@ -196,7 +232,7 @@ function _renderGantt(events,rs,re,pwrMap){
             var sLeft=((visStart-barStart)/barMs)*100;
             var em=eventMeta(s.state==='lock'?'userLock':s.state==='login'?'userLogin':'userLogout');
             var bg = stColor[s.state] || '#2e7d32';
-            var tt='Usuário: '+esc(s.user||s.display)+'\nDe: '+fmtDate(s.start)+'\nAté: '+fmtDate(s.end)+'\nEstado: '+em.label+'\nDuração: '+fmtDur(s.end-s.start);
+            var tt='Usuário: '+esc(s.user||s.display)+'\nDe: '+fmtDate(s.start)+'\nAté: '+fmtDate(s.end)+'\nEstado: '+em.label+'\nDuração: '+fmtDur(s.end-s.start)+eventSrcBadge(s._srcEvt);
             h+='<div style="position:absolute;top:0;height:100%;left:'+sLeft+'%;width:'+sPct+'%;min-width:4px;background:'+bg+';border-right:1px solid rgba(0,0,0,.15);cursor:zoom-in" title="'+esc(tt)+'"></div>';
         });
         h+='<span style="position:absolute;top:1px;left:3px;font-size:8px;font-weight:700;color:#fff;text-shadow:0 0 2px rgba(0,0,0,.6);pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:calc(100% - 6px)" title="'+esc(segs[0].user||'')+'">'+esc(segs[0].user||'')+'</span>';
@@ -290,6 +326,10 @@ function setupGanttDrag(){
                     if (d._activeLusers && typeof d._activeLusers === 'object') _activeLusers = d._activeLusers;
                     renderGantt(d.data || [], d._pwrMap);
                 }
+                if (d.action === 'plugin' && d.plugin === 'usertracer' && d.method === 'liveState') {
+                    dlog('WS','got liveState offline=' + d.offline);
+                    renderLiveState(d);
+                }
             } catch (ex) { dlog('WSE', ex.message); }
         };
         try { ms.socket.addEventListener('message', _wsHandler); dlog('WS','installed'); }
@@ -312,6 +352,8 @@ function setupGanttDrag(){
 })();
 setRange('8h',document.querySelector('.btn[data-r="8h"]'));
 loadHistory();
+queryLiveState();
+setInterval(function(){ if(!_unmounted)queryLiveState(); },60000);
 </script>
 </body>
 </html>

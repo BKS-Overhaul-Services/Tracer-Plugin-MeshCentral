@@ -1,7 +1,12 @@
 /**
- * session-tracer.js — Tracer agent module v0.1.0 (branch feature/session-tracer)
+ * usertracer.js — Tracer agent module v0.1.1 (branch feature/session-tracer)
  * =============================================================================
  * Coleta orientada a evento com store-and-forward. Ver DESIGN-session-tracer.md.
+ *
+ * NOME DO ARQUIVO É CONTRATO: meshcore.js:2067 roteia comandos do servidor via
+ *   require(data.plugin).consoleaction(...)  →  require('usertracer')
+ * Logo este módulo DEVE se chamar usertracer.js dentro de modules_meshcore/.
+ * (Ver tests/contract/upstream-channel.test.js — pina esse contrato no source.)
  *
  * Fluxo:
  *   user-sessions ('locked'/'unlocked'/'changed') → journal (write-ahead, JSONL)
@@ -30,10 +35,29 @@ var BATCH_MAX = 100;                 // eventos por mensagem
 
 var obj = {
     _ObjectID: 'session-tracer',
-    version: '0.1.0',
+    version: '0.1.1',
     schema: SCHEMA,
     enabled: true,       // controlável via config push do servidor
     idleSampleSec: 60    // reservado (idle sampling v0.2)
+};
+
+// Testabilidade: timers acessíveis (node:test precisa limpar p/ encerrar o processo)
+// e _internals com hooks para injetar mocks de MeshAgent/user-sessions e espiar o journal.
+var _timers = [];
+obj._timers = _timers;
+obj._internals = {
+    journal: function () { return _journal; },
+    pendingAck: function () { return _pendingAck; },
+    header: function () { return _header; },
+    append: _journalAppend,
+    drain: _drain,
+    emit: _emit,
+    onChanged: _onChanged,
+    lastUsers: function () { return _lastUsers; },
+    setMesh: function (m) { mesh = m; },
+    setSession: function (s) { userSession = s; },
+    setCap: function (n) { JOURNAL_CAP_EVENTS = n; },
+    save: _saveJournal
 };
 
 // -----------------------------------------------------------------------
@@ -101,15 +125,24 @@ function _journalAppend(type, userStr, sid, ts) {
     _header.nextSeq++;
     _journal.push(evt);
 
-    // cap de segurança: descarta os mais antigos e marca a lacuna
+    // cap de segurança: descarta os mais antigos e marca a lacuna.
+    // dropped conta o espaço do próprio marker (len - cap + 1) → len final <= cap.
     if (_journal.length > JOURNAL_CAP_EVENTS) {
-        var dropped = _journal.length - JOURNAL_CAP_EVENTS;
+        var dropped = _journal.length - JOURNAL_CAP_EVENTS + 1;
         _journal.splice(0, dropped);
-        _journal.push({
-            id: _header.bootId + '-' + _header.nextSeq++,
-            schema: SCHEMA, type: 'journal.truncated',
-            ts: Date.now(), dropped: dropped, seq: _header.nextSeq, bootId: _header.bootId
-        });
+        var mi = -1;
+        for (var k = 0; k < _journal.length; k++) {
+            if (_journal[k].type === 'journal.truncated') { mi = k; break; }
+        }
+        if (mi >= 0) {
+            _journal[mi].dropped += dropped;         // marker único, acumula
+        } else {
+            _journal.push({
+                id: _header.bootId + '-' + _header.nextSeq++,
+                schema: SCHEMA, type: 'journal.truncated',
+                ts: Date.now(), dropped: dropped, seq: _header.nextSeq, bootId: _header.bootId
+            });
+        }
     }
     _saveJournal();
     return evt;
@@ -272,8 +305,8 @@ _loadJournal();
 _sendCmd({ action: 'plugin', plugin: 'usertracer', from: 'agent', cmd: 'hello', ver: obj.version, schema: SCHEMA });
 _drain(); // drena pendências de boots anteriores
 
-setInterval(_drain, DRAIN_INTERVAL_MS);
-setInterval(function () {
+_timers.push(setInterval(_drain, DRAIN_INTERVAL_MS));
+_timers.push(setInterval(function () {
     if (!obj.enabled) return;
     _sendCmd({
         action: 'plugin', plugin: 'usertracer', from: 'agent', cmd: 'events',
@@ -283,6 +316,7 @@ setInterval(function () {
             journalPending: _journal.length
         }]
     });
-}, HEARTBEAT_MS);
+}, HEARTBEAT_MS));
+_timers.forEach(function (t) { try { t.unref(); } catch (e) {} });
 
 module.exports = obj;
