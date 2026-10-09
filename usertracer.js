@@ -499,6 +499,9 @@ module.exports.usertracer = function (parent) {
     obj.serveraction = function (command, myparent, gp) {
         try {
             if (!command || command.plugin !== 'usertracer') return;
+            // v4.0 — mensagens do AGENTE (meshagent.js:1591 'case plugin'):
+            // myparent é a conexão do agente (sem .ws/.user). Branch antes do check de sid.
+            if (command.from === 'agent') return obj._agentMessage(command, myparent);
             var sid = null;
             try { sid = myparent && myparent.ws && myparent.ws.sessionId; } catch (_) {}
             if (!sid) {
@@ -516,10 +519,197 @@ module.exports.usertracer = function (parent) {
             if (command.pluginaction === 'getUserNames')        return obj._actionGetUserNames(command, sid, userFromParent);
             if (command.pluginaction === 'getNodeDetails')      return obj._actionGetNodeDetails(command, sid, userFromParent);
             if (command.pluginaction === 'purgeHistory')        return obj._actionPurgeHistory(command, myparent, sid);
+            if (command.pluginaction === 'queryState')          return obj._actionQueryState(command, sid, userFromParent);
             UT_LOG.raw('serveraction: unknown action=' + command.pluginaction + ' raw=' + JSON.stringify(command));
         } catch (e) {
             UT_LOG.error('serveraction', e, { pluginaction: command && command.pluginaction });
         }
+    };
+
+    // -----------------------------------------------------------------------
+    // v4.0 — Ingestão de eventos do agente (session-tracer.js via modules_meshcore)
+    // Canal: meshagent.js 'case plugin' (from:'agent'). At-least-once + dedup por id.
+    // -----------------------------------------------------------------------
+    obj._seenEventIds = {};          // dedup em memória (cap LRU abaixo)
+    obj._seenEventIdsCap = 5000;
+    obj._pendingAgentQueries = {};   // reqId → {sid, timer}
+    obj._agentNodes = {};            // nodeid → {moduleVer, lastHello}
+
+    var UT_AGENT_EVENT_MAP = {
+        'session.logon': UT_EVENT.LOGIN,
+        'session.logoff': UT_EVENT.LOGOUT,
+        'session.lock': UT_EVENT.LOCK,
+        'session.unlock': UT_EVENT.UNLOCK
+    };
+
+    obj._rememberEventId = function (id) {
+        obj._seenEventIds[id] = true;
+        var keys = Object.keys(obj._seenEventIds);
+        if (keys.length > obj._seenEventIdsCap) {
+            // drop LRU aproximado: descarta o primeiro quarto
+            keys.slice(0, keys.length - obj._seenEventIdsCap).forEach(function (k) { delete obj._seenEventIds[k]; });
+        }
+    };
+
+    obj._agentSend = function (agentConn, cmd) {
+        try {
+            if (!agentConn || typeof agentConn.send !== 'function') return false;
+            agentConn.send(cmd);
+            return true;
+        } catch (e) { UT_LOG.error('_agentSend', e); return false; }
+    };
+
+    obj._agentMessage = function (command, agentConn) {
+        try {
+            var nodeid = agentConn && agentConn.nodeid;
+            if (!nodeid || !command || !command.cmd) return;
+            switch (command.cmd) {
+                case 'hello': {
+                    obj._agentNodes[nodeid] = { moduleVer: command.ver, lastHello: Date.now() };
+                    // config push (design §6.5c)
+                    obj._agentSend(agentConn, {
+                        action: 'plugin', plugin: 'usertracer', from: 'server',
+                        cmd: 'config', enabled: true, idleSampleSec: 60
+                    });
+                    UT_LOG.info('agent hello node=' + nodeid.substring(0, 40) + ' ver=' + command.ver);
+                    break;
+                }
+                case 'events': {
+                    obj._agentIngest(command, agentConn, nodeid);
+                    break;
+                }
+                case 'state': {
+                    // resposta da query on-demand → roteia de volta ao browser
+                    var pending = obj._pendingAgentQueries[command.reqId];
+                    if (pending) {
+                        clearTimeout(pending.timer);
+                        delete obj._pendingAgentQueries[command.reqId];
+                        obj._send(pending.sid, {
+                            action: 'plugin', plugin: 'usertracer', method: 'liveState',
+                            reqId: command.reqId, nodeid: nodeid,
+                            offline: false, sessions: command.sessions || [],
+                            locked: command.locked || [], moduleVer: command.moduleVer,
+                            journalPending: command.journalPending
+                        });
+                    }
+                    break;
+                }
+            }
+        } catch (e) {
+            UT_LOG.error('_agentMessage', e, { cmd: command && command.cmd });
+        }
+    };
+
+    obj._agentIngest = function (command, agentConn, nodeid) {
+        var batch = Array.isArray(command.batch) ? command.batch : [];
+        if (batch.length > 200) { UT_LOG.error('_agentIngest', new Error('batch too large'), { n: batch.length }); batch = batch.slice(0, 200); }
+        var ackIds = [];
+        var toStore = [];
+        var pendingDbCheck = 0;
+        var nodeName = null;
+        try {
+            var ws = obj.meshServer.webserver.wsagents || {};
+            var ag = ws[nodeid];
+            nodeName = (ag && ag.name) || obj.getNodeName(nodeid) || nodeid;
+        } catch (_) {}
+
+        function finish() {
+            if (pendingDbCheck > 0) return;
+            // grava o que passou no dedup antes de ack (garante persist antes do agente apagar)
+            toStore.forEach(function (evt) { obj.db.addEvent(evt); });
+            // ACK: tudo processado (inclusive duplicados) — o agente remove do journal
+            obj._agentSend(agentConn, {
+                action: 'plugin', plugin: 'usertracer', from: 'server', cmd: 'ack', ids: ackIds
+            });
+            if (toStore.length > 0) {
+                UT_LOG.info('agent events stored node=' + nodeName + ' n=' + toStore.length + ' (dups=' + (ackIds.length - toStore.length) + ')');
+            }
+        }
+
+        batch.forEach(function (ev) {
+            try {
+                if (!ev || !ev.id || !ev.type || typeof ev.ts !== 'number') return; // inválido → sem ack, agente reenvia; cap evita loop infinito
+                ackIds.push(ev.id);
+                if (ev.type === 'journal.truncated') {
+                    obj.db.addEvent({
+                        nodeid: nodeid, nodeName: nodeName,
+                        eventType: 'journalTruncated', src: 'agent',
+                        eventId: ev.id, ts: ev.ts,
+                        dropped: ev.dropped || 0,
+                        detectedAt: new Date(ev.ts).toISOString()
+                    });
+                    obj._rememberEventId(ev.id);
+                    return;
+                }
+                if (ev.type === 'device.heartbeat') {
+                    obj._agentNodes[nodeid] = obj._agentNodes[nodeid] || {};
+                    obj._agentNodes[nodeid].lastHeartbeat = ev.ts;
+                    obj._agentNodes[nodeid].journalPending = ev.journalPending;
+                    return; // heartbeat não vai pro banco de eventos
+                }
+                var mapped = UT_AGENT_EVENT_MAP[ev.type];
+                if (!mapped) return; // tipo desconhecido de schema futuro
+                // dedup: memória primeiro, banco em segundo (reenvio pós-restart do server)
+                if (obj._seenEventIds[ev.id]) return;
+                pendingDbCheck++;
+                obj.db.getEvents({ eventId: ev.id }, { limit: 1 }, function (docs) {
+                    pendingDbCheck--;
+                    if (!docs || docs.length === 0) {
+                        var username = ev.user || '', domain = '';
+                        if (username.indexOf('\\') >= 0) { var p = username.split('\\'); domain = p[0]; username = p[1]; }
+                        toStore.push({
+                            nodeid: nodeid, nodeName: nodeName,
+                            username: username, domain: domain, displayUser: ev.user,
+                            eventType: mapped, src: 'agent', sid: ev.sid || null,
+                            eventId: ev.id, ts: ev.ts, srvTs: Date.now(),
+                            clockSkew: Math.abs(ev.ts - Date.now()) > 10 * 60 * 1000,
+                            detectedAt: new Date(ev.ts).toISOString()
+                        });
+                        obj._rememberEventId(ev.id);
+                    }
+                    finish();
+                });
+            } catch (e) {
+                UT_LOG.error('_agentIngest:event', e, { type: ev && ev.type });
+            }
+        });
+        finish();
+    };
+
+    // -----------------------------------------------------------------------
+    // v4.0 — query-state on-demand: browser pergunta, servidor repassa ao agente
+    // -----------------------------------------------------------------------
+    obj._actionQueryState = function (command, sid, parentUser) {
+        var nid = command.nodeid;
+        if (!nid) { obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: command._reqSeq, offline: true, error: 'no nodeid' }); return; }
+        var user = obj._getSessionUser(sid, parentUser);
+        if (!user) { obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: command._reqSeq, offline: true, error: 'unauthorized' }); return; }
+        obj._filterAccessibleNodeIds(user, [nid], function (accessible) {
+            if (!accessible || accessible.length === 0) {
+                obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: command._reqSeq, offline: true, error: 'forbidden' });
+                return;
+            }
+            var ws = obj.meshServer.webserver.wsagents || {};
+            var agentConn = ws[nid];
+            if (!agentConn) {
+                obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: command._reqSeq, nodeid: nid, offline: true });
+                return;
+            }
+            var reqId = 'q' + Date.now() + '-' + Math.floor(Math.random() * 100000);
+            var timer = setTimeout(function () {
+                delete obj._pendingAgentQueries[reqId];
+                obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: reqId, nodeid: nid, offline: true, timeout: true });
+            }, 5000);
+            obj._pendingAgentQueries[reqId] = { sid: sid, timer: timer };
+            var sent = obj._agentSend(agentConn, {
+                action: 'plugin', plugin: 'usertracer', from: 'server', cmd: 'query-state', reqId: reqId
+            });
+            if (!sent) {
+                clearTimeout(timer);
+                delete obj._pendingAgentQueries[reqId];
+                obj._send(sid, { action:'plugin', plugin:'usertracer', method:'liveState', reqId: command._reqSeq, nodeid: nid, offline: true });
+            }
+        });
     };
 
     // --- getCurrentUsers: ACL filter via GetNodeWithRights (v3.5.83 security fix) ---
