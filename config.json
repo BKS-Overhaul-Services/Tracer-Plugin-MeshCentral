@@ -1,7 +1,7 @@
 {
   "name": "User-Device Tracer",
   "shortName": "usertracer",
-  "version": "4.0.0-beta.2",
+  "version": "4.0.0-beta.3",
   "author": "Misael Filho",
   "description": "Rastreia associação entre usuários e dispositivos Windows em ambiente AD. Mantém lastro histórico de qual usuário AD usou qual máquina, com timeline e auditoria. v4: coleta orientada a evento no agente (session-tracer) com store-and-forward.",
   "hasAdminPanel": true,
