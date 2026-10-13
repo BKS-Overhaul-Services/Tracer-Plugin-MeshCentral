@@ -1,18 +1,18 @@
 {
   "name": "User-Device Tracer",
   "shortName": "usertracer",
-  "version": "3.5.98",
+  "version": "4.0.0-beta.1",
   "author": "Misael Filho",
-  "description": "Rastreia associação entre usuários e dispositivos Windows em ambiente AD. Mantém lastro histórico de qual usuário AD usou qual máquina, com timeline e auditoria.",
+  "description": "Rastreia associação entre usuários e dispositivos Windows em ambiente AD. Mantém lastro histórico de qual usuário AD usou qual máquina, com timeline e auditoria. v4: coleta orientada a evento no agente (session-tracer) com store-and-forward.",
   "hasAdminPanel": true,
-  "homepage": "https://github.com/jukmisael/Tracer-Plugin-MeshCentral",
-  "changelogUrl": "https://raw.githubusercontent.com/jukmisael/Tracer-Plugin-MeshCentral/master/changelog.md",
-  "configUrl": "https://raw.githubusercontent.com/jukmisael/Tracer-Plugin-MeshCentral/master/config.json",
-  "downloadUrl": "https://github.com/jukmisael/Tracer-Plugin-MeshCentral/archive/master.zip",
+  "homepage": "https://github.com/BKS-Overhaul-Services/Tracer-Plugin-MeshCentral/tree/feature/session-tracer",
+  "changelogUrl": "https://raw.githubusercontent.com/BKS-Overhaul-Services/Tracer-Plugin-MeshCentral/feature/session-tracer/changelog.md",
+  "configUrl": "https://raw.githubusercontent.com/BKS-Overhaul-Services/Tracer-Plugin-MeshCentral/feature/session-tracer/config.json",
+  "downloadUrl": "https://github.com/BKS-Overhaul-Services/Tracer-Plugin-MeshCentral/archive/refs/heads/feature/session-tracer.zip",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jukmisael/Tracer-Plugin-MeshCentral.git"
+    "url": "https://github.com/BKS-Overhaul-Services/Tracer-Plugin-MeshCentral.git"
   },
-  "versionHistoryUrl": "https://api.github.com/repos/jukmisael/Tracer-Plugin-MeshCentral/tags",
+  "versionHistoryUrl": "https://api.github.com/repos/BKS-Overhaul-Services/Tracer-Plugin-MeshCentral/tags",
   "meshCentralCompat": ">=1.0.0"
 }
