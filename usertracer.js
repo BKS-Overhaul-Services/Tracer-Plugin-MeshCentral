@@ -75,7 +75,9 @@ module.exports.usertracer = function (parent) {
     obj.parent = parent;
     obj.meshServer = parent.parent;
     obj.debug = obj.meshServer.debug;
-    obj.exports = ['onDeviceRefreshEnd', 'currentUsers', 'nodeDetails', 'purgeResult', 'timeline', 'deviceNames', 'userNames'];
+    obj.exports = ['onDeviceRefreshEnd', 'currentUsers', 'nodeDetails', 'purgeResult', 'timeline', 'deviceNames', 'userNames', 'liveState'];
+    // no-op p/ main frame (mesma razão do NetAdapter): liveState é tratado no iframe
+    obj.liveState = function () {};
     obj.db = null;
     obj.mdb = obj.meshServer.db;
     obj.scanTimer = null;
