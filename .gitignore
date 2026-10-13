@@ -2,3 +2,6 @@
 %TEMP%test-plugin.zip
 /.megamemory
 plugin-test.zip
+
+# journals de teste (devem viver só no tmpdir do teste)
+*.journal
